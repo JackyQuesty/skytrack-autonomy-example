@@ -383,21 +383,73 @@ def travel_s(a: Pt, b: Pt) -> float:
     return dist(a, b) / TRANSIT_SPEED_M_S + 4.0
 
 
-def hop(ctx: Any, target: Pt, alt: float, speed: float, rects: list[tuple[float, float, float, float]], name: str) -> Iterator[Any]:
+def hop(ctx: Any, target: Pt, alt: float, speed: float,
+        rects: list[tuple[float, float, float, float]], name: str) -> Iterator[Any]:
+    """Move to target without generating near-zero horizontal hops.
+
+    The previous version created interpolated points very close to the current
+    position and then sent multiple fly_to() commands to them. In the
+    simulator this can look like the drone has stopped moving. Keep only
+    meaningful waypoints and use the final waypoint for descent.
+    """
     cur = pos(ctx)
     pts = route(cur, target, rects)
+
+    # Remove duplicate / almost identical horizontal waypoints.
+    clean: list[Pt] = []
+    last = cur
+    for w in pts:
+        if dist(last, w) >= 1.0:
+            clean.append(w)
+            last = w
+
+    if not clean:
+        return
+
+    seq: list[tuple[Pt, float]] = []
+
     if dist(cur, target) <= SHORT_HOP_M:
-        seq = [(w, alt) for w in pts]
+        # Short move: go directly to the target altitude.
+        seq = [(clean[-1], alt)]
     else:
         high = max(alt, TRANSIT_ALT_M)
-        seq = [(lerp(cur, pts[0], min(1.0, CLIMB_M / max(dist(cur, pts[0]), 1e-6))), high)]
-        seq += [(w, high) for w in pts[:-1]]
-        last_prev = pts[-2] if len(pts) > 1 else cur
-        k = min(1.0, DESCEND_M / max(dist(last_prev, pts[-1]), 1e-6))
-        seq.append((lerp(pts[-1], last_prev, k), high))
-        seq.append((pts[-1], alt))
-    for i, (w, a) in enumerate(seq):
-        yield fly_to(north=w[1], east=w[0], alt_m=a, target_speed=speed, name=f"{name}_{i}")
+
+        # If already at cruise altitude, don't issue a stationary climb command.
+        current_alt = getattr(ctx.senses.pose.current_position, "z", 0.0)
+        current_agl = -float(current_alt) + CAM_HEIGHT_AT_HOME_M
+
+        if abs(current_agl - high) > 1.0:
+            # Vertical climb only when actually needed.
+            seq.append((cur, high))
+
+        # Follow the actual route at cruise altitude.
+        for w in clean[:-1]:
+            if not seq or dist(seq[-1][0], w) >= 1.0:
+                seq.append((w, high))
+
+        # Descend only at the destination.
+        seq.append((clean[-1], alt))
+
+    # Never send a redundant command to the same horizontal point and altitude.
+    emitted: list[tuple[Pt, float]] = []
+    for w, a in seq:
+        if emitted:
+            prev_w, prev_a = emitted[-1]
+            if dist(prev_w, w) < 1.0 and abs(prev_a - a) < 1.0:
+                continue
+        emitted.append((w, a))
+
+    for i, (w, a) in enumerate(emitted):
+        ctx.world.log_info(
+            f"{TAG} {name}_{i}: target E={w[0]:.1f} N={w[1]:.1f} ALT={a:.1f}"
+        )
+        yield fly_to(
+            north=w[1],
+            east=w[0],
+            alt_m=a,
+            target_speed=speed,
+            name=f"{name}_{i}",
+        )
 
 
 def mission_break_and_resume(ctx: Any) -> Iterator[Any]:
