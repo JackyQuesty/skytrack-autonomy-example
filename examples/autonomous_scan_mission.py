@@ -1,18 +1,12 @@
 """Autonomous scan -> detect -> spray mission (X500 nozzle + camera).
 
-Level 6
-What you learn: Complex multi-phase mission, geometric planning, dynamic battery estimation, background services (mapping and spraying).
-Requires: Camera, Sprayer
-Run::
-    python -m local_planner.examples.autonomous_scan_mission
-
 Strategy
 ========
 1. SCAN   High and fast (30 m, 7 m/s) in long lanes aligned strictly parallel to both
           the left and right major polygon borders, mapping yellow pixels.
           Uses 40% footprint overlap (+10% increased accuracy).
 2. SPRAY  Low and slow (3 m, ~5 m/s). Uses 25% swath overlap (+10% increased accuracy).
-          The valve is opened by a position + speed gate, so it is only open while
+          The valve is opened by a position + speed gate, so it is only open while 
           the drone is inside the target run AND at cruise speed.
 3. POWER  Battery (15 min) and mission clock (90 min) are estimated before every
           lane. If a lane plus the flight back to the nearest pad does not fit,
@@ -34,14 +28,14 @@ from typing import Any, Iterator
 import cv2
 import numpy as np
 
-from local_planner import boot_drone, brake, brake_and_settle, fly_to, land, takeoff
+from local_planner import boot_drone, brake, fly_to, land, takeoff
 from skytrack_autonomy import Sprayer
 from skytrack_autonomy.core.lib.scheduling import ScheduleGroup
 
 Pt = tuple[float, float]          # (x east, y north)
 
 # ══ World Layout ═════════════════════════════════════════════════════════════
-PADS = {
+PADS = {                          
     "CS1": (0.00, 0.00),
     "CS2": (329.32, -234.73),
     "CS3": (356.43, -654.32),
@@ -50,7 +44,7 @@ PADS = {
 
 # AOI boundary outline (ENU metres)
 AOI_POLYGONS: list[list[Pt]] = [
-    [(-78.67, 50.77), (378.32, 104.18), (448.42, -641.53), (424.78, -660.47),
+    [(-78.67, 50.77), (378.32, 104.18), (448.42, -641.53), (424.78, -660.47), 
      (227.35, -712.59), (158.80, -609.15), (35.82, -641.37)],
 ]
 
@@ -96,26 +90,27 @@ NO_FLY_RECTS: list[tuple[float, float, float, float]] = [
 ]
 
 NO_FLY_MARGIN_M = 8.0             # 5 m rule + 3 m safety buffer
-SPRAY_EXTRA_MARGIN_M = 1.5
+SPRAY_EXTRA_MARGIN_M = 1.5        
 
 # ══ Mission Limits ═══════════════════════════════════════════════════════════
 BATTERY_S = 900.0                 # 15 min battery life
 BATTERY_USABLE = 0.85             # plan with 85% usable battery
 RESERVE_S = 45.0                  # spare time for landing
 MISSION_S = 90 * 60.0
-END_RESERVE_S = 240.0
-CHARGE_EST_S = 90.0
-LAND_S = 10.0
+END_RESERVE_S = 240.0             
+CHARGE_EST_S = 90.0               
+LAND_S = 10.0                     
 
 # ══ Flight Parameters ════════════════════════════════════════════════════════
-TRANSIT_SPEED_M_S = 8.0
-SHORT_HOP_M = 60.0
+TRANSIT_ALT_M = 30.0              
+TRANSIT_SPEED_M_S = 7.0          
+SHORT_HOP_M = 60.0                
 CLIMB_M = 25.0
 DESCEND_M = 30.0
 
 # ══ Scan Parameters ══════════════════════════════════════════════════════════
-SCAN_ALT_M = 30.0
-SCAN_SPEED_M_S = 7.0
+SCAN_ALT_M = 30.0                 
+SCAN_SPEED_M_S = 7.0              
 CAM_FX = 269.968
 CAM_CX, CAM_CY = 320.0, 240.0
 CAM_AHEAD_M = 0.125
@@ -125,7 +120,7 @@ EFFECTIVE_SCAN_ALT_M = SCAN_ALT_M + CAM_HEIGHT_AT_HOME_M
 # Exact Field of View calculation based on camera intrinsics
 SCAN_WIDTH_M = 2.0 * (CAM_CX / CAM_FX) * EFFECTIVE_SCAN_ALT_M
 # Increased overlap by +10% (30% -> 40% overlap for enhanced mapping precision)
-SCAN_SPACING_M = 0.60 * SCAN_WIDTH_M
+SCAN_SPACING_M = 0.60 * SCAN_WIDTH_M      
 
 # Boundary margins pull drone center inside field while camera covers the edges
 SCAN_MARGIN_ACROSS_M = (CAM_CX / CAM_FX) * EFFECTIVE_SCAN_ALT_M * 0.85
@@ -138,14 +133,14 @@ YELLOW_HSV_LOW = (15, 40, 40)
 YELLOW_HSV_HIGH = (28, 255, 255)
 CELL_M = 0.5
 MIN_SAMPLES_PER_CELL = 2
-YELLOW_FRACTION = 0.5
-MIN_AREA_M2 = 2.0
-STRESS_AREA_PATH = Path.home() / ".ros/captures/stress_area.json"
+YELLOW_FRACTION = 0.5             
+MIN_AREA_M2 = 2.0                 
+STRESS_AREA_PATH = Path("/root/.ros/captures/stress_area.json")
 
 # ══ Spray Parameters ═════════════════════════════════════════════════════════
 SPRAY_ALT_M = 3.0
-SPRAY_SPEED_MAX_M_S = 5.0
-TARGET_MEAN_DOSE = 1.5
+SPRAY_SPEED_MAX_M_S = 5.0         
+TARGET_MEAN_DOSE = 2.0           
 FLOW_ML_S = 1000.0 / 60.0
 EFFICIENCY = 0.7
 NOZZLE_HEIGHT_M = SPRAY_ALT_M + 0.117
@@ -158,9 +153,9 @@ PREDICTED_DOSE = FLOW_ML_S * EFFICIENCY / (SPRAY_SWATH_M * SPRAY_SPEED_M_S)
 SPRAY_LANE_SPACING_M = 0.75 * SPRAY_SWATH_M
 
 MIN_SPRAY_RUN_M = 0.5
-RUN_IN_M = 12.0
+RUN_IN_M = 12.0                   
 GATE_HZ = 10.0
-GATE_MIN_SPEED_FRAC = 0.85
+GATE_MIN_SPEED_FRAC = 0.85        
 GATE_MAX_OFFSET_M = 3.0
 
 TAG = "[FARM]"
@@ -268,7 +263,7 @@ def get_primary_border_angle(polygon: list[Pt]) -> float:
 
     # Get the two primary long edges forming the left and right boundaries
     edges.sort(key=lambda e: e[0], reverse=True)
-
+    
     def norm_angle(a: float) -> float:
         while a > math.pi / 2:
             a -= math.pi
@@ -278,20 +273,20 @@ def get_primary_border_angle(polygon: list[Pt]) -> float:
 
     a1 = norm_angle(edges[0][1])
     a2 = norm_angle(edges[1][1]) if len(edges) > 1 else a1
-
+    
     diff = norm_angle(a2 - a1)
     return norm_angle(a1 + diff / 2.0)
 
 
 def lanes_in_polygon(
-    polygon: list[Pt],
-    spacing: float,
-    min_run: float = 15.0,
-    margin_across: float = 0.0,
+    polygon: list[Pt], 
+    spacing: float, 
+    min_run: float = 15.0, 
+    margin_across: float = 0.0, 
     margin_along: float = 0.0
 ) -> list[tuple[Pt, Pt]]:
     """Generates flight lanes aligned PARALLEL to the left/right field border bisector.
-
+    
     1. Computes primary border orientation angle.
     2. Rotates polygon frame so lanes run parallel down the long axis of the field.
     3. Insets scan range with margin_across and margin_along.
@@ -394,11 +389,12 @@ def hop(ctx: Any, target: Pt, alt: float, speed: float, rects: list[tuple[float,
     if dist(cur, target) <= SHORT_HOP_M:
         seq = [(w, alt) for w in pts]
     else:
-        seq = [(lerp(cur, pts[0], min(1.0, CLIMB_M / max(dist(cur, pts[0]), 1e-6))), alt)]
-        seq += [(w, alt) for w in pts[:-1]]
+        high = max(alt, TRANSIT_ALT_M)
+        seq = [(lerp(cur, pts[0], min(1.0, CLIMB_M / max(dist(cur, pts[0]), 1e-6))), high)]
+        seq += [(w, high) for w in pts[:-1]]
         last_prev = pts[-2] if len(pts) > 1 else cur
         k = min(1.0, DESCEND_M / max(dist(last_prev, pts[-1]), 1e-6))
-        seq.append((lerp(pts[-1], last_prev, k), alt))
+        seq.append((lerp(pts[-1], last_prev, k), high))
         seq.append((pts[-1], alt))
     for i, (w, a) in enumerate(seq):
         yield fly_to(north=w[1], east=w[0], alt_m=a, target_speed=speed, name=f"{name}_{i}")
@@ -408,20 +404,20 @@ def mission_break_and_resume(ctx: Any) -> Iterator[Any]:
     yield from ()
 
 
-def refuel(ctx: Any, st: Flight, alt: float, final: bool = False) -> Iterator[Any]:
+def refuel(ctx: Any, st: Flight, final: bool = False) -> Iterator[Any]:
     name, pad = nearest_pad(pos(ctx))
     pad_zones = [inflate(r, NO_FLY_MARGIN_M) for r in NO_FLY_RECTS]
     pad_zones = [z for z in pad_zones if not (z[0] <= pad[0] <= z[2] and z[1] <= pad[1] <= z[3])]
-    yield from hop(ctx, pad, alt, TRANSIT_SPEED_M_S, pad_zones, f"to_{name}")
+    yield from hop(ctx, pad, TRANSIT_ALT_M, TRANSIT_SPEED_M_S, pad_zones, f"to_{name}")
     yield fly_to(north=pad[1], east=pad[0], alt_m=6.0, target_speed=2.0, name=f"over_{name}")
-    yield brake_and_settle(name=f"pre_land_{name}")
+    yield brake(name=f"pre_land_{name}")
     yield land()
     ctx.world.log_info(f"{TAG} landed at {name} t={st.elapsed(ctx):.0f}s")
     if final:
         return
     yield from mission_break_and_resume(ctx)
     st.charges += 1
-    yield takeoff(alt_m=alt)
+    yield takeoff(alt_m=TRANSIT_ALT_M)
     st.t_air = ctx.world.now()
 
 
@@ -436,7 +432,11 @@ class StressMap:
         rows = int((max(ys) + margin - self.y0) / CELL_M) + 1
         cols = int((max(xs) + margin - self.x0) / CELL_M) + 1
         self.seen = np.zeros((rows, cols), dtype=np.int32)
-        self.yellow = np.zeros((rows, cols), dtype=np.int32)
+
+# Các đặc trưng được tích lũy trong lần chạy hiện tại.
+        self.color_score = np.zeros((rows, cols),   dtype=np.float32)
+        self.texture_score = np.zeros((rows, cols),   dtype=np.float32)
+        self.context_score = np.zeros((rows, cols),   dtype=np.float32)
         self.aoi = np.zeros((rows, cols), dtype=np.uint8)
         for poly in polygons:
             cell = np.array([[(x - self.x0) / CELL_M, (y - self.y0) / CELL_M] for x, y in poly],
@@ -444,6 +444,7 @@ class StressMap:
             cv2.fillPoly(self.aoi, [cell], 1)
         self.pictures = 0
         self._last_seq = -1
+
 
     def snap(self, ctx: Any) -> None:
         camera = ctx.senses.camera
@@ -461,8 +462,172 @@ class StressMap:
         self.pictures += 1
 
     def add_picture(self, rgb: np.ndarray, pose: Any) -> None:
+
+    # Features:
+    #   - color_score: màu sắc tương đối so với khu vực xung quanh
+    #   - texture_score: mức độ thay đổi texture
+    #   - context_score: khác biệt so với bối cảnh cục bộ
+    
         hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
-        is_yellow = cv2.inRange(hsv, YELLOW_HSV_LOW, YELLOW_HSV_HIGH) > 0
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+
+        h, w = gray.shape
+        sat = hsv[:, :, 1].astype(np.float32) / 255.0
+        val = hsv[:, :, 2].astype(np.float32) / 255.0
+
+        # Độ lệch màu tương đối so với trung bình cục bộ.
+        local_sat = cv2.GaussianBlur(sat, (0, 0), 7)
+        local_val = cv2.GaussianBlur(val, (0, 0), 7)
+
+        color_diff = (
+            np.abs(sat - local_sat) +
+            np.abs(val - local_val)
+        ) * 0.5
+
+        color_score = np.clip(color_diff * 2.0, 0.0, 1.0)
+
+        gray_f = gray.astype(np.float32) / 255.0
+
+        local_mean = cv2.GaussianBlur(
+            gray_f,
+            (0, 0),
+            TEXTURE_KERNEL
+        )
+
+        local_sq_mean = cv2.GaussianBlur(
+            gray_f * gray_f,
+            (0, 0),
+            TEXTURE_KERNEL
+        )
+
+        local_variance = np.maximum(
+            local_sq_mean - local_mean * local_mean,
+            0.0
+        )
+
+        texture = np.sqrt(local_variance)
+
+        texture_local = cv2.GaussianBlur(
+            texture,
+            (0, 0),
+            7
+        )
+
+        texture_diff = np.abs(texture - texture_local)
+
+        texture_score = np.clip(
+            texture_diff * 5.0,
+            0.0,
+            1.0
+        )
+
+
+        context_mean = cv2.GaussianBlur(
+            gray_f,
+            (0, 0),
+            LOCAL_CONTEXT_RADIUS_M
+        )
+
+        context_diff = np.abs(gray_f - context_mean)
+
+        context_score = np.clip(
+            context_diff * 3.0,
+            0.0,
+            1.0
+        )
+
+
+        v, u = np.mgrid[0:h:2, 0:w:2]
+
+        height = -pose.z + CAM_HEIGHT_AT_HOME_M
+
+        right = (
+            (u - CAM_CX) /
+            CAM_FX *
+            height
+        )
+
+        back = (
+            (v - CAM_CY) /
+            CAM_FX *
+            height
+        )
+
+        cos_h = math.cos(pose.heading)
+        sin_h = math.sin(pose.heading)
+
+        cam_east = (
+            pose.y +
+            CAM_AHEAD_M * sin_h
+        )
+
+        cam_north = (
+            pose.x +
+            CAM_AHEAD_M * cos_h
+        )
+
+        east = (
+            cam_east +
+            right * cos_h -
+            back * sin_h
+        )
+
+        north = (
+            cam_north -
+            right * sin_h -
+            back * cos_h
+        )
+
+    
+        row = (
+            (north - self.y0) /
+            CELL_M
+        ).astype(int)
+
+        col = (
+            (east - self.x0) /
+            CELL_M
+        ).astype(int)
+
+        ok = (
+            (row >= 0) &
+            (row < self.seen.shape[0]) &
+            (col >= 0) &
+            (col < self.seen.shape[1])
+        )
+
+        row = row[ok]
+        col = col[ok]
+
+        scores = frame_score[v, u][ok]
+
+    # ---------------------------------------------------------------
+    # 8. Tích lũy dữ liệu của CURRENT RUN
+    # ---------------------------------------------------------------
+
+        np.add.at(
+            self.seen,
+            (row, col),
+            1
+        )
+
+        np.add.at(
+            self.color_score,
+            (row, col),
+            color_score[v, u][ok]
+        )
+
+        np.add.at(
+            self.texture_score,
+            (row, col),
+            texture_score[v, u][ok]
+        )
+
+        np.add.at(
+            self.context_score,
+            (row, col),
+            context_score[v, u][ok]
+        )
         h, w = is_yellow.shape
         v, u = np.mgrid[0:h:2, 0:w:2]
         height = -pose.z + CAM_HEIGHT_AT_HOME_M
@@ -481,22 +646,89 @@ class StressMap:
         np.add.at(self.yellow, (row, col), is_yellow[v, u][ok].astype(np.int32))
 
     def stress_areas(self) -> list[dict[str, Any]]:
-        frac = self.yellow / np.maximum(self.seen, 1)
-        mask = ((frac >= YELLOW_FRACTION) & (self.seen >= MIN_SAMPLES_PER_CELL)
-                & (self.aoi > 0)).astype(np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        seen_safe = np.maximum(self.seen, 1)
+
+        # Trung bình các quan sát trong CURRENT RUN.
+        color_mean = self.color_score / seen_safe
+        texture_mean = self.texture_score / seen_safe
+        context_mean = self.context_score / seen_safe
+
+
+        stress_score = (
+            0.40 * color_mean +
+            0.30 * texture_mean +
+            0.30 * context_mean
+        )
+
+        mask = (
+            (stress_score >= STRESS_SCORE_THRESHOLD) &
+            (self.seen >= MIN_SAMPLES_PER_CELL) &
+            (self.aoi > 0)
+        ).astype(np.uint8)
+
+
+        mask = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_OPEN,
+            np.ones((3, 3), np.uint8)
+        )
+
+        mask = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_CLOSE,
+            np.ones((5, 5), np.uint8)
+        )
+
+
+        contours, _ = cv2.findContours(
+            mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
         areas = []
+
         for contour in contours:
-            if len(contour) < 3 or cv2.contourArea(contour) * CELL_M ** 2 < MIN_AREA_M2:
-                continue
-            contour = cv2.approxPolyDP(contour, 1.0, True)
+
             if len(contour) < 3:
                 continue
-            polygon = [[float(self.x0 + (c + 0.5) * CELL_M), float(self.y0 + (r + 0.5) * CELL_M)]
-                       for c, r in contour[:, 0]]
-            areas.append({"class": "stressed", "polygon": polygon})
+
+            area_m2 = (
+                cv2.contourArea(contour) *
+                CELL_M ** 2
+            )
+
+            if area_m2 < MIN_AREA_M2:
+                continue
+
+            contour = cv2.approxPolyDP(
+                contour,
+                1.0,
+                True
+            )
+
+            if len(contour) < 3:
+                continue
+
+            polygon = [
+                [
+                    float(self.x0 + (c + 0.5) * CELL_M),
+                    float(self.y0 + (r + 0.5) * CELL_M)
+                ]
+                for c, r in contour[:, 0]
+            ]
+
+            areas.append({
+                "class": "stressed",
+                "polygon": polygon,
+                "score": float(
+                    np.mean([
+                        stress_score[r, c]
+                        for c, r in contour[:, 0]
+                    ])
+                ),
+            })
+
         return areas
 
 
@@ -546,13 +778,13 @@ def safe_extend(p: Pt, u: Pt, length: float, rects: list[tuple[float, float, flo
 def scan_phase(ctx: Any, st: Flight, smap: StressMap) -> Iterator[Any]:
     zones = [inflate(r, NO_FLY_MARGIN_M) for r in NO_FLY_RECTS]
     todo: list[tuple[Pt, Pt]] = []
-
+    
     for poly in AOI_POLYGONS:
-        for a, b in lanes_in_polygon(poly, SCAN_SPACING_M, min_run=15.0,
+        for a, b in lanes_in_polygon(poly, SCAN_SPACING_M, min_run=15.0, 
                                      margin_across=SCAN_MARGIN_ACROSS_M,
                                      margin_along=SCAN_MARGIN_ALONG_M):
             todo.extend(clip_outside(a, b, zones))
-
+            
     ctx.world.log_info(f"{TAG} scan: {len(todo)} parallel lane piece(s), spacing {SCAN_SPACING_M:.1f} m (40% overlap)")
 
     n = 0
@@ -566,7 +798,7 @@ def scan_phase(ctx: Any, st: Flight, smap: StressMap) -> Iterator[Any]:
             if not st.fits_clock(ctx, cost, b, charge=True):
                 break
             save_stress_areas(smap.stress_areas())
-            yield from refuel(ctx, st, alt=SCAN_ALT_M)
+            yield from refuel(ctx, st)
         elif not st.fits_clock(ctx, cost, b):
             break
         todo.pop(0)
@@ -612,7 +844,7 @@ def spray_phase(ctx: Any, st: Flight, areas: list[dict[str, Any]]) -> Iterator[A
         if not st.fits_battery(ctx, cost, run_out):
             if not st.fits_clock(ctx, cost, run_out, charge=True):
                 break
-            yield from refuel(ctx, st, alt=SPRAY_ALT_M)
+            yield from refuel(ctx, st)
             continue
         if not st.fits_clock(ctx, cost, run_out):
             break
@@ -634,13 +866,13 @@ def spray_phase(ctx: Any, st: Flight, areas: list[dict[str, Any]]) -> Iterator[A
                        f"t={st.elapsed(ctx):.0f}s, charges={st.charges}")
 
 
-def autonomous_scan_mission(ctx: Any) -> Iterator[Any]:
+def farm_mission(ctx: Any) -> Iterator[Any]:
     log = ctx.world.log_info
     st = Flight(ctx)
     smap = StressMap(AOI_POLYGONS)
     assert SCAN_ALT_M <= 38.0, "scan altitude too close to the 40 m AGL limit"
 
-    yield takeoff(alt_m=SCAN_ALT_M)
+    yield takeoff(alt_m=TRANSIT_ALT_M)
     st.t_air = ctx.world.now()
 
     yield from scan_phase(ctx, st, smap)
@@ -649,16 +881,16 @@ def autonomous_scan_mission(ctx: Any) -> Iterator[Any]:
     log(f"{TAG} {len(areas)} stress area(s) saved to {STRESS_AREA_PATH}")
 
     yield from spray_phase(ctx, st, areas)
-    yield from refuel(ctx, st, alt=SPRAY_ALT_M, final=True)
+    yield from refuel(ctx, st, final=True)
 
 
-autonomous_scan_mission.requires_senses = ["pose", "obstacle", "status", "camera"]
+farm_mission.requires_senses = ["pose", "obstacle", "status", "camera"]
 
 
 def main() -> None:
     with boot_drone() as drone:
         drone.add_service(Sprayer())
-        drone.fly(autonomous_scan_mission)
+        drone.fly(farm_mission)
         drone.run()
 
 
