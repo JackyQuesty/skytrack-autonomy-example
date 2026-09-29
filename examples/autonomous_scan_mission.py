@@ -129,12 +129,16 @@ SCAN_MARGIN_ALONG_M = (CAM_CY / CAM_FX) * EFFECTIVE_SCAN_ALT_M * 0.85
 MAP_HZ = 1.0
 
 # ══ Stress Detection Parameters ══════════════════════════════════════════════
-YELLOW_HSV_LOW = (15, 40, 40)
-YELLOW_HSV_HIGH = (28, 255, 255)
 CELL_M = 0.5
 MIN_SAMPLES_PER_CELL = 2
-YELLOW_FRACTION = 0.5             
-MIN_AREA_M2 = 2.0                 
+MIN_AREA_M2 = 2.0
+
+# Multi-feature detector thresholds / scales.
+# These are tunable detector parameters, not fixed-color rules from the brief.
+STRESS_SCORE_THRESHOLD = 0.55
+TEXTURE_KERNEL = 7.0
+LOCAL_CONTEXT_RADIUS_M = 7.0
+
 STRESS_AREA_PATH = Path("/root/.ros/captures/stress_area.json")
 
 # ══ Spray Parameters ═════════════════════════════════════════════════════════
@@ -383,73 +387,21 @@ def travel_s(a: Pt, b: Pt) -> float:
     return dist(a, b) / TRANSIT_SPEED_M_S + 4.0
 
 
-def hop(ctx: Any, target: Pt, alt: float, speed: float,
-        rects: list[tuple[float, float, float, float]], name: str) -> Iterator[Any]:
-    """Move to target without generating near-zero horizontal hops.
-
-    The previous version created interpolated points very close to the current
-    position and then sent multiple fly_to() commands to them. In the
-    simulator this can look like the drone has stopped moving. Keep only
-    meaningful waypoints and use the final waypoint for descent.
-    """
+def hop(ctx: Any, target: Pt, alt: float, speed: float, rects: list[tuple[float, float, float, float]], name: str) -> Iterator[Any]:
     cur = pos(ctx)
     pts = route(cur, target, rects)
-
-    # Remove duplicate / almost identical horizontal waypoints.
-    clean: list[Pt] = []
-    last = cur
-    for w in pts:
-        if dist(last, w) >= 1.0:
-            clean.append(w)
-            last = w
-
-    if not clean:
-        return
-
-    seq: list[tuple[Pt, float]] = []
-
     if dist(cur, target) <= SHORT_HOP_M:
-        # Short move: go directly to the target altitude.
-        seq = [(clean[-1], alt)]
+        seq = [(w, alt) for w in pts]
     else:
         high = max(alt, TRANSIT_ALT_M)
-
-        # If already at cruise altitude, don't issue a stationary climb command.
-        current_alt = getattr(ctx.senses.pose.current_position, "z", 0.0)
-        current_agl = -float(current_alt) + CAM_HEIGHT_AT_HOME_M
-
-        if abs(current_agl - high) > 1.0:
-            # Vertical climb only when actually needed.
-            seq.append((cur, high))
-
-        # Follow the actual route at cruise altitude.
-        for w in clean[:-1]:
-            if not seq or dist(seq[-1][0], w) >= 1.0:
-                seq.append((w, high))
-
-        # Descend only at the destination.
-        seq.append((clean[-1], alt))
-
-    # Never send a redundant command to the same horizontal point and altitude.
-    emitted: list[tuple[Pt, float]] = []
-    for w, a in seq:
-        if emitted:
-            prev_w, prev_a = emitted[-1]
-            if dist(prev_w, w) < 1.0 and abs(prev_a - a) < 1.0:
-                continue
-        emitted.append((w, a))
-
-    for i, (w, a) in enumerate(emitted):
-        ctx.world.log_info(
-            f"{TAG} {name}_{i}: target E={w[0]:.1f} N={w[1]:.1f} ALT={a:.1f}"
-        )
-        yield fly_to(
-            north=w[1],
-            east=w[0],
-            alt_m=a,
-            target_speed=speed,
-            name=f"{name}_{i}",
-        )
+        seq = [(lerp(cur, pts[0], min(1.0, CLIMB_M / max(dist(cur, pts[0]), 1e-6))), high)]
+        seq += [(w, high) for w in pts[:-1]]
+        last_prev = pts[-2] if len(pts) > 1 else cur
+        k = min(1.0, DESCEND_M / max(dist(last_prev, pts[-1]), 1e-6))
+        seq.append((lerp(pts[-1], last_prev, k), high))
+        seq.append((pts[-1], alt))
+    for i, (w, a) in enumerate(seq):
+        yield fly_to(north=w[1], east=w[0], alt_m=a, target_speed=speed, name=f"{name}_{i}")
 
 
 def mission_break_and_resume(ctx: Any) -> Iterator[Any]:
@@ -651,8 +603,6 @@ class StressMap:
         row = row[ok]
         col = col[ok]
 
-        scores = frame_score[v, u][ok]
-
     # ---------------------------------------------------------------
     # 8. Tích lũy dữ liệu của CURRENT RUN
     # ---------------------------------------------------------------
@@ -680,22 +630,6 @@ class StressMap:
             (row, col),
             context_score[v, u][ok]
         )
-        h, w = is_yellow.shape
-        v, u = np.mgrid[0:h:2, 0:w:2]
-        height = -pose.z + CAM_HEIGHT_AT_HOME_M
-        right = (u - CAM_CX) / CAM_FX * height
-        back = (v - CAM_CY) / CAM_FX * height
-        cos_h, sin_h = math.cos(pose.heading), math.sin(pose.heading)
-        cam_east = pose.y + CAM_AHEAD_M * sin_h
-        cam_north = pose.x + CAM_AHEAD_M * cos_h
-        east = cam_east + right * cos_h - back * sin_h
-        north = cam_north - right * sin_h - back * cos_h
-        row = ((north - self.y0) / CELL_M).astype(int)
-        col = ((east - self.x0) / CELL_M).astype(int)
-        ok = (row >= 0) & (row < self.seen.shape[0]) & (col >= 0) & (col < self.seen.shape[1])
-        row, col = row[ok], col[ok]
-        np.add.at(self.seen, (row, col), 1)
-        np.add.at(self.yellow, (row, col), is_yellow[v, u][ok].astype(np.int32))
 
     def stress_areas(self) -> list[dict[str, Any]]:
         seen_safe = np.maximum(self.seen, 1)
